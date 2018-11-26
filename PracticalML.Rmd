@@ -1,0 +1,187 @@
+---
+title: "Practical ML"
+author: "Nathania"
+date: "November 25, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Read the Data
+After downloading the data from the data source, we can read the two csv files into two data frames.  
+
+```{r cars}
+library(RCurl)
+URLtrain <-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+x <- getURL(URLtrain)
+train <- read.csv(textConnection(x))
+URLtest <-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+x <- getURL(URLtest)
+test <- read.csv(textConnection(x))
+
+```
+
+### Clean Data
+In this step, we will clean the data and get rid of observations with missing values as well as some meaningless variables.
+```{r}
+sum(is.na(train))
+```
+#### Handling Missing values
+```{r}
+library(tidyverse)
+trainClean <- train[, colSums((is.na(train)))==0]
+testClean <- test[, colSums((is.na(test))) == 0]
+```
+
+```{r}
+classe <- trainClean$classe
+
+trainRemove <- grepl("^X|timestamp|window", names(trainClean))
+trainClean <- trainClean[, !trainRemove]
+trainCleaned <- trainClean[, sapply(trainClean, is.numeric)]
+trainCleaned$classe <- classe
+testRemove <- grepl("^X|timestamp|window", names(testClean))
+testClean <- testClean[, !testRemove]
+testCleaned <- testClean[, sapply(testClean, is.numeric)]
+```
+
+Now, the cleaned training data set contains 19622 observations and 53 variables, while the testing data set contains 20 observations and 53 variables. The "classe" variable is still in the cleaned training set.
+
+### Partitioned Training Set
+Then, we can split the cleaned training set into a pure training data set (80%) and a validation data set (20%).The validation data set will used for cross validation in future steps.  
+
+```{r}
+library(caret)
+set.seed(23123)
+inTrain <- createDataPartition(trainCleaned$classe, p=0.80, list=F)
+trainSet <- trainCleaned[inTrain, ]
+validSet <- trainCleaned[-inTrain, ]
+
+```
+
+```{r}
+# function for determining sparseness of variables
+sparse <- function(b) {
+    n <- length(b)
+    na.count <- sum(is.na(b))
+    return((n - na.count)/n)
+}
+
+# sparness of input variables based on training subset
+varSparse <- apply(trainSet, 2, sparse)
+
+# trim down the subs by removing sparse variables
+trimTrainSub <- trainSet[, varSparse > 0.9]
+```
+
+### Data Modeling
+We fit a predictive model for activity recognition using **Random Forest** algorithm because it automatically selects important variables and is robust to correlated covariates & outliers in general. We will use **5 and 10 -fold cross validation** for comparison.
+
+#### Determine Predictor by measuring Variable Importance
+Here, 20% from the training data will used to determine variable importance
+```{r}
+inVarImp <- createDataPartition(y = trimTrainSub$classe, p = 0.2, list = F)
+varImpSub <- trimTrainSub[inVarImp,]
+RF <-  train(classe ~ ., data = varImpSub, method = "rf")
+```
+
+Let's observe the importance variable
+```{r fig.height=6, fig.width=5}
+library(tidyverse)
+varImpObj <- varImp(RF)
+df <- as.data.frame(cbind(rownames(varImpObj$importance), varImpObj$importance$Overall))
+colnames(df) <- c("Feature", "Importance")
+df <- df %>% arrange(desc(Importance))
+ggplot(df, aes(Importance, Feature))+
+  geom_bar(aes(fill=Feature), stat = "identity", show.legend=FALSE)+
+  theme_bw()+ggtitle("Variable Importance of Top 52")
+```
+
+```{r fig.height=6, fig.width=5}
+top25 <- df %>% arrange(desc(Importance)) %>% top_n(25) %>% ggplot(aes(Importance, Feature))+
+  geom_bar(aes(fill=Feature), stat = "identity",
+           show.legend=FALSE)+
+  theme_bw()+
+  ggtitle("Variable Importance of Top 25")
+
+```
+Here the 60% training data (80%-20%) will used as final training set. While the feature selection will only pick top 25% variable importance  
+
+```{r}
+set.seed(1343242)
+finalTrainSet <- trimTrainSub[-inVarImp, ]
+thresh <- quantile(varImpObj$importance[, 1], 0.75)
+filterVar <- varImpObj$importance[, 1] >= thresh
+finalTrainSet <- finalTrainSet[, filterVar]
+```
+
+```{r}
+crf5 <- trainControl(method="cv", 5)
+crf10 <- trainControl(method="cv", 10)
+modRf5 <- train(classe ~ ., data=finalTrainSet, method="rf", trControl=crf5, ntree=500)
+modRf10 <- train(classe ~ ., data=finalTrainSet, method="rf", trControl=crf10, ntree=500)
+print("Random Forest with 5-Cross Validation")
+modRf5
+print("Random Forest with 10-Cross Validation")
+modRf10
+```
+
+
+```{r}
+validSet <- validSet[, varSparse > 0.9]
+validSet <- validSet[,filterVar]
+
+pr5 <- predict(modRf5,validSet)
+print("In-Sample Error with 5-Cross Validation")
+
+confusionMatrix(validSet$classe,pr5)
+
+pr10 <- predict(modRf10,validSet)
+print("In-Sample Error with 10-Cross Validation")
+confusionMatrix(validSet$classe,pr10)
+
+```
+
+```{r}
+acc5 <- postResample(pr5, validSet$classe)
+acc5
+
+acc10 <- postResample(pr10, validSet$classe)
+acc10
+```
+
+```{r}
+outSample5 <- 1 - as.numeric(confusionMatrix(validSet$classe, pr5)$overall[1])
+outSample10 <- 1 - as.numeric(confusionMatrix(validSet$classe, pr10)$overall[1])
+outSample5
+outSample10
+
+```
+
+We compare the out sample error between 5 and 10 fold cross validation, from above result we observe that 10 fold cross validation much better than 5 fold.
+
+So, the estimated accuracy of the model is `r acc10 ` and the estimated out-of-sample error is `r outSample10 `.
+
+## Predicting for Test Data Set
+
+Now, we apply the model to the original testing data set downloaded from the data source. We remove the `problem_id` column first. 
+```{r}
+res5 <- predict(modRf10, testCleaned[, -length(names(testCleaned))])
+res5
+
+```
+## Appendix: Figures
+1. Correlation  
+```{r, fig.height=10, fig.width=10}
+library(GGally);library(corrplot)
+corrdf <- cor(trainSet[, -length(names(trainSet))])
+corrplot(corrdf, method="circle")
+```
+2. Decision Tree  
+```{r}
+library(rpart);library(rattle)
+mod <- rpart(classe ~ ., data=trainSet, method="class")
+fancyRpartPlot(mod)  
+```
